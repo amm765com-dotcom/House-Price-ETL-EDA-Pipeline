@@ -1,200 +1,195 @@
+"""
+ETL + EDA pipeline for Lahore house prices.
+
+How to run:
+    python 01_EXTRACT.py                    # uses built-in sample rows
+    python 01_EXTRACT.py lahore_data.csv    # uses your own CSV file
+
+Required CSV columns: area (sq ft), bedrooms, bathrooms, location, property_type, price
+Optional CSV columns: number_floors, year_built
+Outputs: house_prices.db (table: properties) and eda_report.png
+"""
+
 import sqlite3
+import sys
 from typing import Optional
+
+import matplotlib
+matplotlib.use("Agg")  # saves image without popping up a GUI window
 import matplotlib.pyplot as plt
 import pandas as pd
-from pydantic import BaseModel, Field, ValidationError
 import seaborn as sns
+from pydantic import BaseModel, Field, ValidationError
 
 
-# ==========================================
-# 1. PYDANTIC MODEL FOR DATA VALIDATION
-# ==========================================
-class HousePropertyModel(BaseModel):
-  area: float = Field(..., gt=0, description='Area must be a positive number')
-  bedrooms: int = Field(
-      ..., ge=0, description='Bedrooms must be a non-negative integer'
-  )
-  bathrooms: float = Field(..., ge=0)
-  location: str = Field(..., min_length=1)
-  property_type: str
-  number_floors: Optional[int] = Field(default=1, ge=1)
-  year_built: Optional[int] = Field(default=2000, ge=1800)
-  price: float = Field(..., gt=0, description='Price must be a positive number')
+DB_FILE = "house_prices.db"
+EXPECTED_COLUMNS = [
+    "area",
+    "bedrooms",
+    "bathrooms",
+    "location",
+    "property_type",
+    "number_floors",
+    "year_built",
+    "price",
+]
 
 
-# ==========================================
-# 2. EXTRACT PHASE (Mock API Extraction)
-# ==========================================
-def extract_data():
-  print('--- [EXTRACT] Fetching raw data from API ---')
-
-  raw_api_data = [
-      {
-          'area': 1200.5,
-          'bedrooms': 3,
-          'bathrooms': 2.0,
-          'location': 'Gulberg',
-          'property_type': 'House',
-          'number_floors': 2,
-          'year_built': 2018,
-          'price': 15500000.0,
-      },
-      {
-          'area': 850.0,
-          'bedrooms': 2,
-          'bathrooms': 1.0,
-          'location': 'DHA',
-          'property_type': 'Apartment',
-          'number_floors': 1,
-          'year_built': 2020,
-          'price': 9000000.0,
-      },
-      {
-          'area': 1200.5,
-          'bedrooms': 3,
-          'bathrooms': 2.0,
-          'location': 'Gulberg',
-          'property_type': 'House',
-          'number_floors': 2,
-          'year_built': 2018,
-          'price': 15500000.0,
-      },  # Duplicate record
-      {
-          'area': -500.0,
-          'bedrooms': 4,
-          'bathrooms': 3.0,
-          'location': 'Model Town',
-          'property_type': 'House',
-          'number_floors': 2,
-          'year_built': 2015,
-          'price': -20000.0,
-      },  # Invalid data
-      {
-          'area': None,
-          'bedrooms': 4,
-          'bathrooms': 3.0,
-          'location': 'Bahria Town',
-          'property_type': 'Villa',
-          'number_floors': 2,
-          'year_built': 2021,
-          'price': 22000000.0,
-      },  # Missing value
-  ]
-
-  return pd.DataFrame(raw_api_data)
+class PropertyRecord(BaseModel):
+    """Schema to check each row before saving to the database."""
+    area: float = Field(..., gt=0)
+    bedrooms: int = Field(..., ge=0)
+    bathrooms: float = Field(..., ge=0)
+    location: str = Field(..., min_length=1)
+    property_type: str = Field(..., min_length=1)
+    number_floors: Optional[int] = Field(default=1, ge=1)
+    year_built: Optional[int] = Field(default=2000, ge=1800)
+    price: float = Field(..., gt=0)
 
 
-# ==========================================
-# 3. TRANSFORM PHASE (Pandas Cleaning)
-# ==========================================
-def transform_data(df):
-  print('--- [TRANSFORM] Cleaning data using Pandas ---')
-  initial_count = len(df)
+def extract_rows(csv_file=None):
+    """Load data from a CSV file, or fall back to sample rows for testing."""
+    if csv_file:
+        print(f"--- [EXTRACT] Reading {csv_file} ---")
+        return pd.read_csv(csv_file)
 
-  df = df.dropna(subset=['area', 'price', 'bedrooms', 'location'])
-  df = df.drop_duplicates()
+    print("--- [EXTRACT] No CSV passed, using sample demo rows ---")
+    sample_defaults = {
+        "bedrooms": 3,
+        "bathrooms": 2.0,
+        "number_floors": 2,
+        "year_built": 2018,
+    }
 
-  df['location'] = df['location'].str.strip().str.title()
-  df['property_type'] = df['property_type'].str.strip().str.title()
-
-  print(
-      f'Cleaned records count: {len(df)} (Removed {initial_count - len(df)}'
-      ' rows)'
-  )
-  return df
-
-
-# ==========================================
-# 4. VALIDATE PHASE (Pydantic Validation)
-# ==========================================
-def validate_data(df):
-  print('--- [VALIDATE] Validating records using Pydantic ---')
-  valid_records = []
-
-  for index, row in df.iterrows():
-    try:
-      validated_row = HousePropertyModel(**row.to_dict())
-      valid_records.append(validated_row.model_dump())
-    except ValidationError as e:
-      print(f'Validation failed for row {index}: {e.errors()}')
-
-  print(f'Successfully validated {len(valid_records)} records.')
-  return pd.DataFrame(valid_records)
+    sample_rows = [
+        {**sample_defaults, "area": 1200.5, "location": "Gulberg", "property_type": "House", "price": 15500000.0},
+        {"area": 850.0, "bedrooms": 2, "bathrooms": 1.0, "location": "DHA", "property_type": "Apartment", "number_floors": 1, "year_built": 2020, "price": 9000000.0},
+        {"area": 1500.0, "bedrooms": 4, "bathrooms": 3.0, "location": "Johar Town", "property_type": "House", "number_floors": 2, "year_built": 2016, "price": 17500000.0},
+        {**sample_defaults, "area": 1200.5, "location": "Gulberg", "property_type": "House", "price": 15500000.0},  # duplicate row
+        {"area": -500.0, "bedrooms": 4, "bathrooms": 3.0, "location": "Model Town", "property_type": "House", "number_floors": 2, "year_built": 2015, "price": -20000.0},  # negative values
+        {"area": None, "bedrooms": 4, "bathrooms": 3.0, "location": "Bahria Town", "property_type": "Villa", "number_floors": 2, "year_built": 2021, "price": 22000000.0},  # missing area
+    ]
+    return pd.DataFrame(sample_rows)
 
 
-# ==========================================
-# 5. LOAD PHASE (Database Storage)
-# ==========================================
-def load_data(df):
-  print('--- [LOAD] Loading validated data into Database ---')
-  conn = sqlite3.connect('house_prices.db')
-  df.to_sql('properties', conn, if_exists='replace', index=False)
-  conn.close()
-  print("Data successfully loaded into 'house_prices.db' under table 'properties'!")
+def clean_data(df):
+    """Clean raw rows: drop missing/duplicates, normalize text, and fill defaults."""
+    print("--- [TRANSFORM] Cleaning data ---")
+    start_count = len(df)
+    df = df.copy()
+
+    # Make sure all expected columns exist
+    for col in EXPECTED_COLUMNS:
+        if col not in df.columns:
+            df[col] = None
+
+    df = df[EXPECTED_COLUMNS]
+
+    # Drop rows missing core fields
+    required_cols = ["area", "price", "bedrooms", "bathrooms", "location", "property_type"]
+    df = df.dropna(subset=required_cols)
+
+    # Remove duplicate rows
+    df = df.drop_duplicates().copy()
+
+    # Clean text fields
+    df["location"] = df["location"].astype(str).str.strip().str.title()
+    df["property_type"] = df["property_type"].astype(str).str.strip().str.title()
+
+    # Fill optional fields with sensible defaults
+    df["number_floors"] = df["number_floors"].fillna(1)
+    df["year_built"] = df["year_built"].fillna(2000)
+
+    # Filter out extreme price outliers using IQR only when dataset is large enough
+    if len(df) >= 30:
+        q1, q3 = df["price"].quantile([0.25, 0.75])
+        iqr = q3 - q1
+        lower_bound = q1 - 3 * iqr
+        upper_bound = q3 + 3 * iqr
+        df = df[df["price"].between(lower_bound, upper_bound)]
+
+    end_count = len(df)
+    print(f"Rows: {start_count} -> {end_count} (removed {start_count - end_count})")
+    return df
 
 
-# ==========================================
-# 6. EDA PHASE (Exploratory Data Analysis)
-# ==========================================
-def perform_eda():
-  print('\n--- [EDA] Starting Exploratory Data Analysis ---')
+def validate_rows(df):
+    """Validate each row with Pydantic and keep only valid records."""
+    print("--- [VALIDATE] Checking rows with Pydantic ---")
+    valid_rows = []
+    rejected_count = 0
 
-  conn = sqlite3.connect('house_prices.db')
-  df = pd.read_sql('SELECT * FROM properties', conn)
-  conn.close()
+    for idx, row in df.iterrows():
+        try:
+            record = PropertyRecord(**row.to_dict())
+            valid_rows.append(record.model_dump())
+        except ValidationError as err:
+            rejected_count += 1
+            bad_fields = [item["loc"][0] for item in err.errors()]
+            print(f"  Skipped row {idx} (issue in: {bad_fields})")
 
-  if df.empty:
-    print('No data available in database for EDA.')
-    return
-
-  # Descriptive Statistics
-  print('\n--- Descriptive Statistics ---')
-  print(df.describe())
-
-  # Correlation Analysis
-  print('\n--- Correlation with Price ---')
-  numeric_df = df.select_dtypes(include=['number'])
-  correlation = numeric_df.corr()['price'].sort_values(ascending=False)
-  print(correlation)
-
-  # Visualizations
-  sns.set_theme(style='whitegrid')
-  plt.figure(figsize=(14, 6))
-
-  # Plot 1: Price Distribution
-  plt.subplot(1, 2, 1)
-  sns.histplot(df['price'], kde=True, color='blue')
-  plt.title('House Price Distribution')
-  plt.xlabel('Price')
-  plt.ylabel('Frequency')
-
-  # Plot 2: Area vs Price
-  plt.subplot(1, 2, 2)
-  sns.scatterplot(x='area', y='price', data=df, hue='bedrooms', palette='viridis')
-  plt.title('House Area vs Price')
-  plt.xlabel('Area')
-  plt.ylabel('Price')
-
-  plt.tight_layout()
-  plt.show()
-  print('\nEDA Completed Successfully! Visualizations generated.')
+    print(f"Valid: {len(valid_rows)} | Rejected: {rejected_count}")
+    return pd.DataFrame(valid_rows)
 
 
-# ==========================================
-# PIPELINE EXECUTION
-# ==========================================
-if __name__ == '__main__':
-  print('Starting Complete ETL & EDA Pipeline Execution...\n')
+def save_to_db(df):
+    """Write cleaned and validated rows into SQLite."""
+    print("--- [LOAD] Saving to SQLite ---")
+    conn = sqlite3.connect(DB_FILE)
+    df.to_sql("properties", conn, if_exists="replace", index=False)
+    conn.close()
+    print(f"Saved {len(df)} rows into '{DB_FILE}' (table: properties)")
 
-  raw_df = extract_data()
-  transformed_df = transform_data(raw_df)
-  validated_df = validate_data(transformed_df)
 
-  if not validated_df.empty:
-    load_data(validated_df)
-    # Yahan EDA function call kiya gaya hai load hone ke baad
-    perform_eda()
-  else:
-    print('No valid data available to load.')
+def run_eda():
+    """Print basic summary stats and save 3 quick EDA charts."""
+    print("\n--- [EDA] Exploratory Data Analysis ---")
+    conn = sqlite3.connect(DB_FILE)
+    df = pd.read_sql("SELECT * FROM properties", conn)
+    conn.close()
 
-  print('\nPipeline Completed Successfully!')
+    if df.empty:
+        print("Database table is empty, skipping EDA.")
+        return
+
+    print(df.describe().round(1))
+
+    print("\nCorrelation with price:")
+    numeric_df = df.select_dtypes("number")
+    print(numeric_df.corr()["price"].sort_values(ascending=False).round(3))
+
+    sns.set_theme(style="whitegrid")
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+
+    # 1. Price distribution
+    sns.histplot(df["price"] / 1e6, kde=len(df) > 2, color="#0f6b55", ax=axes[0])
+    axes[0].set(title="Price distribution", xlabel="Price (million PKR)")
+
+    # 2. Area vs Price
+    sns.scatterplot(x="area", y=df["price"] / 1e6, data=df, hue="location", ax=axes[1])
+    axes[1].set(title="Area vs price", xlabel="Area (sq ft)", ylabel="Price (million PKR)")
+
+    # 3. Average price by location
+    avg_by_loc = (df.groupby("location")["price"].mean() / 1e6).sort_values()
+    avg_by_loc.plot.barh(color="#e0a22d", ax=axes[2])
+    axes[2].set(title="Average price by location", xlabel="Million PKR")
+
+    plt.tight_layout()
+    plt.savefig("eda_report.png", dpi=130)
+    print("\nSaved charts to eda_report.png")
+
+
+if __name__ == "__main__":
+    csv_arg = sys.argv[1] if len(sys.argv) > 1 else None
+
+    raw_df = extract_rows(csv_arg)
+    cleaned_df = clean_data(raw_df)
+    validated_df = validate_rows(cleaned_df)
+
+    if validated_df.empty:
+        print("No valid rows left after validation.")
+    else:
+        save_to_db(validated_df)
+        run_eda()
+
+    print("\nDone.")
